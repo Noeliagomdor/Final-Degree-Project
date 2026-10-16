@@ -1,0 +1,510 @@
+---
+title: "Mi TFG"
+format:
+  pdf:
+    keep-tex: true   # conserva el .tex generado
+---
+
+Primero cargaremos todas las librerías necesarias
+
+```{r}
+library(REdaS)
+library(rpart)
+library(rpart.plot)
+library(partykit)
+library(pROC)
+library("ranger")
+library(randomForest)
+library(caret)
+library(rsample)
+library(randomForestSRC)
+library(ggplot2)
+library(ggRandomForests)
+library(survival)
+library(patchwork)
+```
+
+
+```{r}
+data<-read.csv("C:/Users/Noelia/Downloads/gbsg.csv") 
+datos<-data[,-c(1,2)]
+head(datos)
+```
+
+# Procesamiento de datos
+
+Además también tenemos que verificar que no haya datos NA
+
+```{r}
+# Ver conteo de NAs por columna
+colSums(is.na(datos))
+# Devuelve TRUE si hay algún duplicado, FALSE si todo es único
+any(duplicated(datos))
+```
+
+```{r}
+# Contar el número exacto de casos
+tabla_frecuencias <- table(datos$status)
+print("Número de datos censurados (0) y eventos (1)")
+print(tabla_frecuencias)
+
+# Ver la proporción / porcentaje
+proporciones <- prop.table(tabla_frecuencias) * 100
+print("Proporción de datos censurados (0) y eventos (1)")
+print(proporciones)
+
+```
+
+
+
+```{r}
+set.seed(123) # Semilla para la reproducibilidad
+# El nombre correcto según tu modelo debe ser rfstime (o el que tenga tu dataset)
+datos$rfstime <- as.numeric(as.character(datos$rfstime))
+datos$status  <- as.numeric(as.character(datos$status))
+
+# Creamos una muestra de los índices de un 66% de las filas de nuestros datos
+indice <- sample(1:nrow(datos), size = 0.90 * nrow(datos))
+
+# Creamos los dos conjuntos de datos de entrenamiento y prueba
+train_data <- datos[indice, ]
+test_data  <- datos[-indice, ]
+
+```
+
+# Árboles de decisión usando survival
+
+
+```{r}
+set.seed(123)
+# Árbol único de supervivencia
+modelo_arbol <- rfsrc(
+  Surv(rfstime, status) ~ age+meno+size+grade+nodes+pgr+er+hormon,
+  data = train_data,
+  ntree = 1,          
+  mtry = ncol(train_data) - 1,  # usar TODAS las variables (como un árbol clásico)
+  nodesize = 15,       # nodos más pequeños posibles
+  forest = TRUE ,      # mantener TRUE para poder hacer predicciones
+  membership = TRUE,
+  importance=TRUE,
+  var.used   = "all.trees"
+  
+)
+
+modelo_arbol
+```
+
+
+
+
+# Informacion extra
+
+```{r}
+modelo_arbol$predicted #funcion de riesgo acumulado estimada para cada sujeto. H(t) evaluada en t mediano
+modelo_arbol$survival #funcion de supervivencia por sujeto (la S) matriz con tiempos t de muerte recaida
+head(modelo_arbol$chf) #funcion de riesgo acumulado estimada en cada tiempo (la H) tiempos t de muerte recaida
+
+
+head(modelo_arbol$time.interest) #los tiempos donde ocurre 1, que son necesarios para calcular S y H
+
+modelo_arbol$err.rate #error oob del modelo (1-c)
+
+
+head(modelo_arbol$membership)  #nodo final al que pertenece cada observacion
+
+```
+
+# Dibujar el árbol
+
+Para dibujar el árbol usaremos la función rpart
+
+
+```{r}
+modelo_rpart <- rpart(
+  Surv(rfstime, status) ~ age+meno+size+grade+nodes+pgr+er+hormon, 
+  data = train_data,
+  method = "exp",           # "exp" le indica a rpart que use Log-Rank/Cox splitting
+  control = rpart.control(minsplit = 15) # Tu tamaño de nodo (nodesize)
+)
+
+# 3. Convertimos el árbol a formato 'party'
+# Esta conversión SÍ funciona directamente porque rpart es compatible
+arbol_graficable <- as.party(modelo_rpart)
+
+# 4. Lo pintamos con las curvas de supervivencia en los nodos
+# Esto quita los números de los rectángulos y deja solo los nombres de las variables
+plot(arbol_graficable, 
+     gp = gpar(fontsize = 8), 
+     inner_panel = node_inner(arbol_graficable, id = FALSE))
+
+
+```
+
+
+
+# predicciones con test_data
+
+```{r}
+predicciones <- predict(modelo_arbol, newdata =test_data) 
+predicciones
+```
+
+
+```{r}
+par(mfrow = c(2, 2))
+
+df_surv_pred_1 <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = predicciones$survival[1,]
+)
+
+p1<-ggplot(df_surv_pred_1, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva supervivencia 1",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+df_surv_pred_2 <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = predicciones$survival[2,]
+)
+
+p2<-ggplot(df_surv_pred_2, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva supervivencia 2",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+df_surv_pred_3 <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = predicciones$survival[3,]
+)
+
+p3<-ggplot(df_surv_pred_3, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva supervivencia 3",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+df_surv_pred_4 <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = predicciones$survival[4,]
+)
+
+p4<-ggplot(df_surv_pred_4, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva supervivencia 4",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+(p1 + p2)/(p3+p4) 
+
+par(mfrow = c(1,1))
+
+```
+
+
+
+```{r}
+df_surv_pred <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = colMeans(predicciones$survival)
+)
+
+ggplot(df_surv_pred, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva de supervivencia media de las predicciones",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+```
+
+
+# Función media de supervivencia media (de los datos de entrenamiento)
+
+```{r}
+df_surv_media <- data.frame(
+  tiempo = modelo_arbol$time.interest,
+  surv   = colMeans(modelo_arbol$survival)
+)
+
+ggplot(df_surv_media, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva de supervivencia media",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+
+```
+
+# Comparacion de curvas de supervivencia para individuos del mismo nodo (arbol)
+
+
+```{r}
+# Verificamos que caen en el mismo nodo
+modelo_arbol$membership[12,]==modelo_arbol$membership[13,] 
+
+#  Extraemos los tiempos (son los mismos para todo el modelo)
+tiempos <- modelo_arbol$time.interest
+
+#  Creamos un único dataframe con AMBAS curvas en formato "largo"
+df_surv_dos <- data.frame(
+  tiempo = c(tiempos, tiempos),
+  surv = c(modelo_arbol$survival[12, ], modelo_arbol$survival[13, ]),
+  Curva = c(rep("Paciente 12", length(tiempos)), rep("Paciente 13", length(tiempos)))
+)
+
+#  Pintamos el gráfico con ggplot
+ggplot(df_surv_dos, aes(x = tiempo, y = surv, color = Curva)) +
+  geom_step(linewidth = 1) +  # Quitamos el color fijo de aquí para que use el de aes()
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_color_manual(values = c("steelblue", "coral")) + # Aquí eliges los dos colores
+  labs(
+    title = "Comparación de Curvas de Supervivencia",
+    x = "Tiempo", 
+    y = "Probabilidad de supervivencia",
+    color = "Pacientes" 
+  ) +
+  theme_minimal()
+```
+```{r}
+tiempos <- modelo_arbol$time.interest
+
+# DataFrames independientes
+df_p12 <- data.frame(tiempo = tiempos, surv = modelo_arbol$survival[12, ])
+df_p13 <- data.frame(tiempo = tiempos, surv = modelo_arbol$survival[13, ])
+
+# Gráfico Paciente 12
+p1 <- ggplot(df_p12, aes(x = tiempo, y = surv)) +
+  geom_step(linewidth = 1, color = "steelblue") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Paciente 12", x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+
+# Gráfico Paciente 13
+p2 <- ggplot(df_p13, aes(x = tiempo, y = surv)) +
+  geom_step(linewidth = 1, color = "coral") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Paciente 13", x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+
+par(mfrow = c(1, 2))
+
+# Gráfico Paciente 12
+plot(modelo_arbol$time.interest, modelo_arbol$survival[12, ], type = "s", 
+     col = "steelblue", lwd = 2, ylim = c(0, 1), 
+     main = "Paciente 12", xlab = "Tiempo", ylab = "Probabilidad de supervivencia")
+abline(h = 0.5, lty = 2, col = "gray50")
+
+# Gráfico Paciente 13
+plot(modelo_arbol$time.interest, modelo_arbol$survival[13, ], type = "s", 
+     col = "coral", lwd = 2, ylim = c(0, 1), 
+     main = "Paciente 13", xlab = "Tiempo", ylab = "Probabilidad de supervivencia")
+abline(h = 0.5, lty = 2, col = "gray50")
+
+par(mfrow = c(1, 1))
+
+
+```
+
+
+
+
+```{r}
+# Ordenar e imprimir
+vimp <- sort(modelo_arbol$importance, decreasing = TRUE)
+
+barplot(vimp,
+        horiz = TRUE,       # barras horizontales — más legible
+        las   = 1,
+        col   = ifelse(vimp > 0, "steelblue", "tomato"),
+        main  = "Importancia de variables (VIMP)",
+        xlab  = "VIMP")
+abline(v = 0, lty = 2, col = "gray40")
+
+
+```
+
+
+
+# Random survival Forest
+
+
+```{r}
+set.seed(256)
+modelo_rsf<-rfsrc(Surv(rfstime,status)~ age+meno+size+grade+nodes+pgr+er+hormon,
+                    data=datos,
+                    ntree=500,
+                    mtry = 3,
+                    bootstrap = "by.root",
+                    splitrule="logrank",
+                    importance=TRUE,
+                  membership = TRUE,
+                  var.used   = "all.trees")
+
+modelo_rsf
+plot(modelo_rsf)
+```
+
+CRPS es una métrica de evaluación de modelos de supervivencia que mide qué tan bien el modelo predice la distribución completa de la función de supervivencia, es decir la curva de supervivencia global para todos los pacientes que es la misma
+
+El CRPS estandarizado compara tu modelo contra un modelo nulo (que ignora todas las covariables). Un valor de 0.16 significa que tu modelo reduce el error de predicción en un 16% respecto a no usar ninguna variable. En supervivencia, valores entre 0.10 y 0.25 son habituales y considerados razonables.
+
+luego dice que mejora un 16 porciento al no asignarle a todos la misma curva
+
+
+# comparamos las supervivencias de las los individuos de antes 12 y 13
+
+```{r}
+#  Extraemos los tiempos (son los mismos para todo el modelo)
+tiempos <- modelo_rsf$time.interest
+
+#  Creamos un único dataframe con AMBAS curvas en formato "largo"
+df_surv_rsf<- data.frame(
+  tiempo = c(tiempos, tiempos),
+  surv = c(modelo_rsf$survival[12, ], modelo_rsf$survival[13, ]),
+  Curva = c(rep("Paciente 12", length(tiempos)), rep("Paciente 13", length(tiempos)))
+)
+
+#  Pintamos el gráfico con ggplot
+ggplot(df_surv_rsf, aes(x = tiempo, y = surv, color = Curva)) +
+  geom_step(linewidth = 1) +  # Quitamos el color fijo de aquí para que use el de aes()
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_color_manual(values = c("steelblue", "coral")) + # Aquí eliges los dos colores
+  labs(
+    title = "Comparación de Curvas de Supervivencia",
+    x = "Tiempo", 
+    y = "Probabilidad de supervivencia",
+    color = "Pacientes" 
+  ) +
+  theme_minimal()
+
+```
+
+# Ver la funcion de supervivencia de distintos pacientes extremos usando la variable nodes (es la que tiene la mayor importancia)
+
+```{r}
+# Buscamos el paciente con más nodos y el que menos nodos tenga
+
+# Ordenar de menor a mayor (Ascendente)
+datos_ordenados <- data[order(data$nodes), ]
+pos1<-head(datos_ordenados,1)["X"][1,]
+pos2<-tail(datos_ordenados,1)["X"][1,]
+#  Extraemos los tiempos (son los mismos para todo el modelo)
+tiempos <- modelo_rsf$time.interest
+
+#  Creamos un único dataframe con AMBAS curvas en formato "largo"
+df_surv_comp <- data.frame(
+  tiempo = c(tiempos, tiempos),
+  surv = c(modelo_rsf$survival[pos1, ], modelo_rsf$survival[pos2, ]),
+  Curva = c(rep("Paciente menor riesgo", length(tiempos)), rep("Paciente mayor riesgo", length(tiempos)))
+)
+
+#  Pintamos el gráfico con ggplot
+ggplot(df_surv_comp, aes(x = tiempo, y = surv, color = Curva)) +
+  geom_step(linewidth = 1) +  # Quitamos el color fijo de aquí para que use el de aes()
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  scale_color_manual(values = c("steelblue", "coral")) + # Aquí eliges los dos colores
+  labs(
+    title = "Comparación de Curvas de Supervivencia",
+    x = "Tiempo", 
+    y = "Probabilidad de supervivencia",
+    color = "Pacientes" 
+  ) +
+  theme_minimal()
+
+```
+
+# creacion de arbol usando todos los datos y las variables que el modelo considera importantes
+
+```{r}
+set.seed(222)
+datos_modelo_completo <- datos[, c("age", "nodes", "pgr", "rfstime", "status")]
+# Árbol único de supervivencia
+modelo_arbol_completo <- rfsrc(
+  Surv(rfstime, status) ~ nodes+pgr+age,
+  data = datos_modelo_completo,
+  ntree = 1,          
+  mtry = ncol(datos_modelo_completo) - 1,  # usar TODAS las variables (como un árbol clásico)
+  nodesize = 15,       # nodos más pequeños posibles
+  forest = TRUE ,      # mantener TRUE para poder hacer predicciones
+  membership = TRUE,
+  importance=TRUE,
+  var.used   = "all.trees" 
+  
+)
+modelo_arbol_completo
+```
+
+```{r}
+modelo_rpart_completo <- rpart(
+  Surv(rfstime, status) ~ nodes+pgr+age, 
+  data = datos_modelo_completo,
+  method = "exp",           # "exp" le indica a rpart que use Log-Rank/Cox splitting
+  control = rpart.control(minsplit = 15) # Tu tamaño de nodo (nodesize)
+)
+
+# 3. Convertimos el árbol a formato 'party'
+# Esta conversión SÍ funciona directamente porque rpart es compatible
+arbol_graficable_completo <- as.party(modelo_rpart_completo)
+
+# 4. Lo pintamos con las curvas de supervivencia en los nodos
+# Esto quita los números de los rectángulos y deja solo los nombres de las variables
+plot(arbol_graficable_completo, 
+     gp = gpar(fontsize = 8), 
+     inner_panel = node_inner(arbol_graficable_completo, id = FALSE))
+
+
+```
+
+
+
+
+# prediccion del nuevo paciente
+
+```{r}
+#  Hacer predicciones con datos nuevos
+datos_nuevo_paciente<- data.frame(
+  age=75,
+  meno=1,
+  size=54,
+  grade=1,
+  nodes=18,
+  pgr=300,
+  er=250,
+  hormon=1
+)
+ 
+# Ver el resultado
+print(datos_nuevo_paciente)
+predicciones <- predict(modelo_rsf, newdata =datos_nuevo_paciente)
+
+df_surv <- data.frame(
+  tiempo = modelo_rsf$time.interest,
+  surv   = predicciones$survival[1,]
+)
+
+ggplot(df_surv, aes(x = tiempo, y = surv)) +
+  geom_step(color = "steelblue", linewidth = 1) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent) +
+  labs(title = "Curva de supervivencia nuevo paciente",
+       x = "Tiempo", y = "Probabilidad de supervivencia") +
+  theme_minimal()
+```
+
+
+
+
+
